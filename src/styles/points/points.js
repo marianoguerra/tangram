@@ -42,46 +42,60 @@ Object.assign(Points, {
     built_in: true,
     vertex_shader_src: shaderSrc_pointsVertex,
     fragment_shader_src: shaderSrc_pointsFragment,
+    selection: true,  // enable feature selection
     collision: true,  // style includes a collision pass
     blend: 'overlay', // overlays drawn on top of all other styles, with blending
 
-    init(options = {}, extra_attributes = []) {
+    init(options = {}) {
         Style.init.call(this, options);
 
-        var attribs = [
+        // Vertex layout
+        let attribs = [
             { name: 'a_position', size: 4, type: gl.SHORT, normalized: false },
             { name: 'a_shape', size: 4, type: gl.SHORT, normalized: false },
             { name: 'a_texcoord', size: 2, type: gl.UNSIGNED_SHORT, normalized: true },
             { name: 'a_offset', size: 2, type: gl.SHORT, normalized: false },
-            { name: 'a_color', size: 4, type: gl.UNSIGNED_BYTE, normalized: true }
+            { name: 'a_color', size: 4, type: gl.UNSIGNED_BYTE, normalized: true },
+            { name: 'a_outline_color', size: 4, type: gl.UNSIGNED_BYTE, normalized: true, static: [0, 0, 0, 0] },
+            { name: 'a_outline_edge', size: 1, type: gl.FLOAT, normalized: false, static: 0 },
+            { name: 'a_selection_color', size: 4, type: gl.UNSIGNED_BYTE, normalized: true }
         ];
 
-        if (extra_attributes.length){
-            Array.prototype.push.apply(attribs, extra_attributes);
-        }
+        this.vertex_layout = new VertexLayout(attribs);
 
-        // Feature selection
-        this.selection = true;
-        attribs.push({ name: 'a_selection_color', size: 4, type: gl.UNSIGNED_BYTE, normalized: true });
+        // Modified vertex layout for shader-drawn points
+        attribs = attribs.map(x => Object.assign({}, x)); // copy attribs
+        attribs.forEach(attrib => {
+            // clear the static attribute value for shader points
+            if (attrib.name === 'a_outline_color' || attrib.name === 'a_outline_edge') {
+                attrib.static = null;
+            }
+        });
+        this.vertex_layout_shader_point = new VertexLayout(attribs);
 
-        // If we're not rendering as overlay, we need a layer attribute
-        if (this.blend !== 'overlay') {
-            this.defines.TANGRAM_LAYER_ORDER = true;
-        }
+        // Shader defines
+        this.setupDefines();
+
+        // Include code for SDF-drawn shader points
+        this.defines.TANGRAM_HAS_SHADER_POINTS = true;
 
         // texture types
         this.defines.TANGRAM_POINT_TYPE_TEXTURE = TANGRAM_POINT_TYPE_TEXTURE;
         this.defines.TANGRAM_POINT_TYPE_LABEL = TANGRAM_POINT_TYPE_LABEL;
         this.defines.TANGRAM_POINT_TYPE_SHADER = TANGRAM_POINT_TYPE_SHADER;
 
-        // if no texture defined, use a shader-drawn point
-        if (!this.texture) {
-            this.defines.TANGRAM_SHADER_POINT = true;
-            attribs.push({ name: 'a_outline_color', size: 4, type: gl.UNSIGNED_BYTE, normalized: true });
-            attribs.push({ name: 'a_outline_edge', size: 1, type: gl.FLOAT, normalized: false });
-        }
+        this.collision_group_points = this.name+'-points';
+        this.collision_group_text = this.name+'-text';
 
-        this.vertex_layout = new VertexLayout(attribs);
+        this.reset();
+    },
+
+    // Setup defines common to points base and child (text) styles
+    setupDefines () {
+        // If we're not rendering as overlay, we need a layer attribute
+        if (this.blend !== 'overlay') {
+            this.defines.TANGRAM_LAYER_ORDER = true;
+        }
 
         // Fade out when tile is zooming out, e.g. acting as proxy tiles
         this.defines.TANGRAM_FADE_ON_ZOOM_OUT = true;
@@ -101,11 +115,6 @@ Object.assign(Points, {
         if (debugSettings.suppress_label_snap_animation !== true) {
             this.defines.TANGRAM_VIEW_PAN_SNAP_RATE = 1 / VIEW_PAN_SNAP_TIME; // inverse time in seconds
         }
-
-        this.collision_group_points = this.name+'-points';
-        this.collision_group_text = this.name+'-text';
-
-        this.reset();
     },
 
     reset () {
@@ -125,15 +134,19 @@ Object.assign(Points, {
         let style = {};
         style.color = this.parseColor(draw.color, context);
 
+        // optional or default texture
+        // TODO: make texture and point rendering compatible within same style
+        style.texture = (draw.texture !== undefined ? draw.texture : this.texture);
+
         // require color or texture
-        if (!style.color && !this.texture) {
+        if (!style.color && !style.texture) {
             return;
         }
 
         // optional sprite
         let sprite_info;
-        if (this.hasSprites()) {
-            sprite_info = this.parseSprite(draw, context);
+        if (this.hasSprites(style)) {
+            sprite_info = this.parseSprite(style, draw, context);
             if (sprite_info) {
                 style.texcoords = sprite_info.texcoords;
             }
@@ -233,24 +246,26 @@ Object.assign(Points, {
         Collision.addStyle(this.collision_group_points, tile.id);
     },
 
-    hasSprites() {
-        return this.texture && Texture.textures[this.texture] && Texture.textures[this.texture].sprites;
+    hasSprites (style) {
+        return style.texture && Texture.textures[style.texture] && Texture.textures[style.texture].sprites;
     },
 
-    getSpriteInfo (sprite) {
-        let info = Texture.textures[this.texture].sprites[sprite] && Texture.getSpriteInfo(this.texture, sprite);
+    getSpriteInfo (style, sprite) {
+        let info = Texture.textures[style.texture].sprites[sprite] && Texture.getSpriteInfo(style.texture, sprite);
         if (sprite && !info) {
-            if (!this.texture_missing_sprites[sprite]) { // only log each missing sprite once
-                log('debug', `Style: in style '${this.name}', could not find sprite '${sprite}' for texture '${this.texture}'`);
-                this.texture_missing_sprites[sprite] = true;
+            // track misisng sprites (per texture)
+            this.texture_missing_sprites[style.texture] = this.texture_missing_sprites[style.texture] || {};
+            if (!this.texture_missing_sprites[style.texture][sprite]) { // only log each missing sprite once
+                log('debug', `Style: in style '${this.name}', could not find sprite '${sprite}' for texture '${style.texture}'`);
+                this.texture_missing_sprites[style.texture][sprite] = true;
             }
         }
         return info;
     },
 
-    parseSprite (draw, context) {
+    parseSprite (style, draw, context) {
         let sprite = StyleParser.evalProperty(draw.sprite, context);
-        let sprite_info = this.getSpriteInfo(sprite) || this.getSpriteInfo(draw.sprite_default);
+        let sprite_info = this.getSpriteInfo(style, sprite) || this.getSpriteInfo(style, draw.sprite_default);
         return sprite_info;
     },
 
@@ -564,37 +579,38 @@ Object.assign(Points, {
      * A "template" that sets constant attibutes for each vertex, which is then modified per vertex or per feature.
      * A plain JS array matching the order of the vertex layout.
      */
-    makeVertexTemplate(style) {
+    makeVertexTemplate(style, mesh) {
         let color = style.color || StyleParser.defaults.color;
+        let vertex_layout = mesh.vertex_data.vertex_layout;
 
         // position - x & y coords will be filled in per-vertex below
-        this.fillVertexTemplate('a_position', 0, { size: 2 });
-        this.fillVertexTemplate('a_position', style.z || 0, { size: 1, offset: 2 });
+        this.fillVertexTemplate(vertex_layout, 'a_position', 0, { size: 2 });
+        this.fillVertexTemplate(vertex_layout, 'a_position', style.z || 0, { size: 1, offset: 2 });
         // layer order - w coord of 'position' attribute (for packing efficiency)
-        this.fillVertexTemplate('a_position', this.scaleOrder(style.order), { size: 1, offset: 3 });
+        this.fillVertexTemplate(vertex_layout, 'a_position', this.scaleOrder(style.order), { size: 1, offset: 3 });
 
         // scaling vector - (x, y) components per pixel, z = angle
-        this.fillVertexTemplate('a_shape', 0, { size: 3 }); // NB: w coord is currently unused, change size: 4 if needed
+        this.fillVertexTemplate(vertex_layout, 'a_shape', 0, { size: 3 }); // NB: w coord is currently unused, change size: 4 if needed
 
         // texture coords
-        this.fillVertexTemplate('a_texcoord', 0, { size: 2 });
+        this.fillVertexTemplate(vertex_layout, 'a_texcoord', 0, { size: 2 });
 
         // offsets
-        this.fillVertexTemplate('a_offset', 0, { size: 2 });
+        this.fillVertexTemplate(vertex_layout, 'a_offset', 0, { size: 2 });
 
         // color
-        this.fillVertexTemplate('a_color', Vector.mult(color, 255), { size: 4 });
+        this.fillVertexTemplate(vertex_layout, 'a_color', Vector.mult(color, 255), { size: 4 });
 
-        // outline
-        if (this.defines.TANGRAM_SHADER_POINT) {
+        // outline (can be static or dynamic depending on style)
+        if (this.defines.TANGRAM_HAS_SHADER_POINTS && mesh.variant.shader_point) {
             let outline_color = style.outline_color || StyleParser.defaults.outline.color;
-            this.fillVertexTemplate('a_outline_color', Vector.mult(outline_color, 255), { size: 4 });
-            this.fillVertexTemplate('a_outline_edge', style.outline_edge_pct || StyleParser.defaults.outline.width, { size: 1 });
+            this.fillVertexTemplate(vertex_layout, 'a_outline_color', Vector.mult(outline_color, 255), { size: 4 });
+            this.fillVertexTemplate(vertex_layout, 'a_outline_edge', style.outline_edge_pct || StyleParser.defaults.outline.width, { size: 1 });
         }
 
         // selection color
         if (this.selection) {
-            this.fillVertexTemplate('a_selection_color', Vector.mult(style.selection_color, 255), { size: 4 });
+            this.fillVertexTemplate(vertex_layout, 'a_selection_color', Vector.mult(style.selection_color, 255), { size: 4 });
         }
 
         return this.vertex_template;
@@ -606,13 +622,13 @@ Object.assign(Points, {
             vertex_data,
             vertex_template,
             {
-                texcoord_index: this.vertex_layout.index.a_texcoord,
-                position_index: this.vertex_layout.index.a_position,
-                shape_index: this.vertex_layout.index.a_shape,
-                offset_index: this.vertex_layout.index.a_offset,
-                offsets_index: this.vertex_layout.index.a_offsets,
-                pre_angles_index: this.vertex_layout.index.a_pre_angles,
-                angles_index: this.vertex_layout.index.a_angles
+                texcoord_index: vertex_data.vertex_layout.index.a_texcoord,
+                position_index: vertex_data.vertex_layout.index.a_position,
+                shape_index: vertex_data.vertex_layout.index.a_shape,
+                offset_index: vertex_data.vertex_layout.index.a_offset,
+                offsets_index: vertex_data.vertex_layout.index.a_offsets,
+                pre_angles_index: vertex_data.vertex_layout.index.a_pre_angles,
+                angles_index: vertex_data.vertex_layout.index.a_angles
             },
             {
                 quad: size,
@@ -633,18 +649,18 @@ Object.assign(Points, {
     },
 
     // Build quad for point sprite
-    build (style, vertex_data, context) {
+    build (style, mesh, context) {
         let label = style.label;
         if (label.type === 'curved') {
-            return this.buildArticulatedLabel(label, style, vertex_data, context);
+            return this.buildArticulatedLabel(label, style, mesh, context);
         }
         else {
-            return this.buildLabel(label, style, vertex_data, context);
+            return this.buildLabel(label, style, mesh, context);
         }
     },
 
-    buildLabel (label, style, vertex_data, context) {
-        let vertex_template = this.makeVertexTemplate(style);
+    buildLabel (label, style, mesh, context) {
+        let vertex_template = this.makeVertexTemplate(style, mesh);
         let angle = label.angle || style.angle;
 
         let size, texcoords;
@@ -657,26 +673,22 @@ Object.assign(Points, {
             texcoords = style.texcoords;
         }
 
-        // re-point to correct label texture
-        let mesh_data = this.getTileMesh(context.tile, this.meshVariantTypeForDraw(style));
-        vertex_data = mesh_data.vertex_data;
-
         // setup style or label texture if applicable
-        mesh_data.uniforms = mesh_data.uniforms || {};
+        mesh.uniforms = mesh.uniforms || {};
         if (style.label_texture) {
-            mesh_data.uniforms.u_texture = style.label_texture;
-            mesh_data.uniforms.u_point_type = TANGRAM_POINT_TYPE_LABEL;
-            mesh_data.uniforms.u_apply_color_blocks = false;
+            mesh.uniforms.u_texture = style.label_texture;
+            mesh.uniforms.u_point_type = TANGRAM_POINT_TYPE_LABEL;
+            mesh.uniforms.u_apply_color_blocks = false;
         }
-        else if (this.texture) {
-            mesh_data.uniforms.u_texture = this.texture;
-            mesh_data.uniforms.u_point_type = TANGRAM_POINT_TYPE_TEXTURE;
-            mesh_data.uniforms.u_apply_color_blocks = true;
+        else if (style.texture) {
+            mesh.uniforms.u_texture = style.texture;
+            mesh.uniforms.u_point_type = TANGRAM_POINT_TYPE_TEXTURE;
+            mesh.uniforms.u_apply_color_blocks = true;
         }
         else {
-            mesh_data.uniforms.u_texture = Texture.default; // ensure a tetxure is always bound to avoid GL warnings ('no texture bound to unit' in Chrome)
-            mesh_data.uniforms.u_point_type = TANGRAM_POINT_TYPE_SHADER;
-            mesh_data.uniforms.u_apply_color_blocks = true;
+            mesh.uniforms.u_texture = Texture.default; // ensure a tetxure is always bound to avoid GL warnings ('no texture bound to unit' in Chrome)
+            mesh.uniforms.u_point_type = TANGRAM_POINT_TYPE_SHADER;
+            mesh.uniforms.u_apply_color_blocks = true;
         }
 
         let offset = label.offset;
@@ -693,12 +705,12 @@ Object.assign(Points, {
             null,                           // placeholder for multiple offsets
             texcoords,                      // texture UVs
             false,                          // if curved boolean
-            vertex_data, vertex_template    // VBO and data for current vertex
+            mesh.vertex_data, vertex_template    // VBO and data for current vertex
         );
     },
 
-    buildArticulatedLabel (label, style, vertex_data, context) {
-        let vertex_template = this.makeVertexTemplate(style);
+    buildArticulatedLabel (label, style, mesh, context) {
+        let vertex_template = this.makeVertexTemplate(style, mesh);
         let angle = label.angle;
         let geom_count = 0;
 
@@ -713,7 +725,6 @@ Object.assign(Points, {
             // re-point to correct label texture
             style.label_texture = style.label_textures[i];
             let mesh_data = this.getTileMesh(context.tile, this.meshVariantTypeForDraw(style));
-            vertex_data = mesh_data.vertex_data;
 
             // add label texture uniform if needed
             mesh_data.uniforms = mesh_data.uniforms || {};
@@ -738,7 +749,7 @@ Object.assign(Points, {
                 offsets,                        // offsets per segment
                 texcoord_stroke,                // texture UVs for stroked text
                 true,                           // if curved
-                vertex_data, vertex_template    // VBO and data for current vertex
+                mesh_data.vertex_data, vertex_template    // VBO and data for current vertex
             );
         }
 
@@ -750,7 +761,6 @@ Object.assign(Points, {
             // re-point to correct label texture
             style.label_texture = style.label_textures[i];
             let mesh_data = this.getTileMesh(context.tile, this.meshVariantTypeForDraw(style));
-            vertex_data = mesh_data.vertex_data;
 
             // add label texture uniform if needed
             mesh_data.uniforms = mesh_data.uniforms || {};
@@ -775,7 +785,7 @@ Object.assign(Points, {
                 offsets,                        // offsets per segment
                 texcoord,                       // texture UVs for fill text
                 true,                           // if curved
-                vertex_data, vertex_template    // VBO and data for current vertex
+                mesh_data.vertex_data, vertex_template    // VBO and data for current vertex
             );
         }
 
@@ -783,25 +793,37 @@ Object.assign(Points, {
     },
 
     // Override to pass-through to generic point builder
-    buildLines (lines, style, vertex_data, context) {
-        return this.build(style, vertex_data, context);
+    buildLines (lines, style, mesh, context) {
+        return this.build(style, mesh, context);
     },
 
-    buildPoints (points, style, vertex_data, context) {
-        return this.build(style, vertex_data, context);
+    buildPoints (points, style, mesh, context) {
+        return this.build(style, mesh, context);
     },
 
-    buildPolygons (points, style, vertex_data, context) {
-        return this.build(style, vertex_data, context);
+    buildPolygons (points, style, mesh, context) {
+        return this.build(style, mesh, context);
+    },
+
+    // Override
+    vertexLayoutForMeshVariant (variant) {
+        if (variant.shader_point) {
+            return this.vertex_layout_shader_point;
+        }
+        return this.vertex_layout;
     },
 
     // Override
     meshVariantTypeForDraw (draw) {
-        // TODO: restore support for varying sprite textures too (?)
-        if (draw.label_texture) {
-            return draw.label_texture;
-        }
-        return this.default_mesh_variant;
+        // TODO: cache variants
+        // TODO: possible name collisions with default/numeric mesh variant and texture names
+        let key = draw.label_texture || draw.texture || this.default_mesh_variant.key; // unique key by texture name
+        let variant = {
+            key,
+            shader_point: (key === this.default_mesh_variant.key), // is shader point
+            order: (draw.label_texture ? 1 : 0) // put text on top of points (e.g. for highway shields, etc.)
+        };
+        return variant;
     },
 
     makeMesh (vertex_data, vertex_elements, options = {}) {
