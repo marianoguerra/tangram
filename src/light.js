@@ -223,7 +223,7 @@ class DirectionalLight extends Light {
     }
 
     set direction (v) {
-        this._direction = Vector.normalize(v);
+        this._direction = Vector.normalize(Vector.copy(v));
     }
 
     // Inject struct and calculate function
@@ -353,7 +353,7 @@ class SpotLight extends PointLight {
     }
 
     set direction (v) {
-        this._direction = Vector.normalize(v);
+        this._direction = Vector.normalize(Vector.copy(v));
     }
 
     // Inject struct and calculate function

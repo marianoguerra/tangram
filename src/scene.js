@@ -62,12 +62,12 @@ export default class Scene {
 
         if (options.preUpdate){
             // optional pre-render loop hook
-            this.subscribe({'preUpdate': options.preUpdate});
+            this.subscribe({'pre_update': options.preUpdate});
         }
 
         if (options.postUpdate){
             // optional post-render loop hook
-            this.subscribe({'postUpdate': options.postUpdate});
+            this.subscribe({'post_update': options.postUpdate});
         }
 
         this.render_loop = !options.disableRenderLoop;  // disable render loop - app will have to manually call Scene.render() per frame
@@ -301,7 +301,7 @@ export default class Scene {
 
         let queue = [];
         this.workers = [];
-        for (var id=0; id < this.num_workers; id++) {
+        for (let id=0; id < this.num_workers; id++) {
             let worker = new Worker(url);
             this.workers[id] = worker;
 
@@ -423,7 +423,7 @@ export default class Scene {
         );
 
         // Pre-render loop hook
-        this.trigger('preUpdate', will_render);
+        this.trigger('pre_update', will_render);
 
         // Update view (needs to update user input timer even if no render will occur)
         this.view.update();
@@ -441,7 +441,7 @@ export default class Scene {
         this.media_capture.completeScreenshot(); // completes screenshot capture if requested
 
         // Post-render loop hook
-        this.trigger('postUpdate', will_render);
+        this.trigger('post_update', will_render);
 
         // Redraw every frame if animating
         if (this.animated === true || this.view.isAnimating()) {
@@ -512,7 +512,7 @@ export default class Scene {
         // optionally force alpha off (e.g. for selection pass)
         allow_blend = (allow_blend == null) ? true : allow_blend;
 
-        this.clearFrame({ clear_color: true, clear_depth: true });
+        this.clearFrame();
 
         // Sort styles by blend order
         let styles = this.tile_manager.getActiveStyles().
@@ -644,23 +644,12 @@ export default class Scene {
         return program;
     }
 
-    clearFrame({ clear_color, clear_depth } = {}) {
+    clearFrame() {
         if (!this.initialized) {
             return;
         }
-
-        // Defaults
-        clear_color = (clear_color === false) ? false : true; // default true
-        clear_depth = (clear_depth === false) ? false : true; // default true
-
-        // Set GL state
-        this.render_states.depth_write.set({ depth_write: clear_depth });
-
-        let gl = this.gl;
-        if (clear_color || clear_depth) {
-            let mask = (clear_color && gl.COLOR_BUFFER_BIT) | (clear_depth && gl.DEPTH_BUFFER_BIT);
-            gl.clear(mask);
-        }
+        this.render_states.depth_write.set({ depth_write: true });
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT | this.gl.STENCIL_BUFFER_BIT);
     }
 
     setRenderState({ depth_test, depth_write, cull_face, blend } = {}) {
@@ -679,8 +668,8 @@ export default class Scene {
         // Reset frame state
         let gl = this.gl;
 
-        render_states.depth_test.set({ depth_test: depth_test });
-        render_states.depth_write.set({ depth_write: depth_write });
+        render_states.depth_test.set({ depth_test });
+        render_states.depth_write.set({ depth_write });
         render_states.culling.set({ cull: cull_face, face: render_states.defaults.culling_face });
 
         // Blending of alpha channel is modified to account for WebGL alpha behavior, see:
@@ -1092,11 +1081,18 @@ export default class Scene {
 
         this.config = SceneLoader.applyGlobalProperties(this.config, this.config_globals_applied);
         if (normalize) {
+            // normalize whole scene
             SceneLoader.normalize(this.config, this.config_bundle);
+        }
+        else {
+            // special handling for shader uniforms that are globals
+            SceneLoader.hoistStyleShaderUniformTextures(this.config, this.config_bundle, { include_globals: true });
+
+            // just normalize top-level textures - necessary for adding base path to globals
+            SceneLoader.normalizeTextures(this.config, this.config_bundle);
         }
         this.trigger(load_event ? 'load' : 'update', { config: this.config });
 
-        SceneLoader.hoistTextures(this.config); // move inline textures into global texture set
         this.style_manager.init();
         this.view.reset();
         this.createLights();
