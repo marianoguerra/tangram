@@ -141,16 +141,16 @@ styles:
     #                 vec3 c = vec3(worldPosition().z * .003 + u_time / 10., 1.0, 1.0);
     #                 color.rgb = hsv2rgb(c);
 
-    # elevator:
-    #     base: polygons
-    #     animated: true
-    #     shaders:
-    #         blocks:
-    #             position: |
-    #                 // Elevator buildings
-    #                 if (position.z > 0.01) {
-    #                     position.z *= (sin(position.z + u_time) + 1.0);
-    #                 }
+    elevator:
+        base: polygons
+        animated: true
+        shaders:
+            blocks:
+                position: |
+                    // Elevator buildings
+                    if (position.z > 0.01) {
+                        position.z *= (sin(position.z + u_time) + 1.0);
+                    }
 
     # envmap:
     #     base: polygons
