@@ -290,7 +290,7 @@ export default class Scene {
 
         let queue = [];
         this.workers = [];
-        for (var id=0; id < this.num_workers; id++) {
+        for (let id=0; id < this.num_workers; id++) {
             var worker = work(require('./scene_worker.js'));
             this.workers[id] = worker;
 
